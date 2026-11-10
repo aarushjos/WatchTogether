@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WatchTogether</title>
+<style>
+  :root { --bg:#0e0f13; --panel:#171920; --line:#262934; --text:#e8e9ee; --muted:#8b8fa0; --accent:#7c9cff; --warn:#ffb454; --ok:#5fd38d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:12px 20px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  .room { color:var(--muted); } .room b { color:var(--text); font-family:monospace; }
+  .spacer { flex:1; }
+  button, label.btn { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:7px 12px; cursor:pointer; font:inherit; }
+  button:hover, label.btn:hover { border-color:var(--accent); }
+  .primary { background:var(--accent) !important; color:#0b0d14 !important; font-weight:600; }
+  input[type=file] { display:none; }
+  input[type=text] { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:7px 10px; font:inherit; }
+  main { display:grid; grid-template-columns:1fr 260px; gap:16px; padding:16px 20px; }
+  @media (max-width:860px) { main { grid-template-columns:1fr; } }
+  .stage { position:relative; background:#000; border-radius:12px; overflow:hidden; aspect-ratio:16/9; }
+  video { width:100%; height:100%; background:#000; }
+  .empty { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--muted); text-align:center; }
+  .overlay { position:absolute; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
+  .overlay.show { display:flex; }
+  aside { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; height:fit-content; }
+  aside h2 { font-size:12px; text-transform:uppercase; color:var(--muted); margin:0 0 10px; }
+  .user { padding:8px 0; border-bottom:1px solid var(--line); }
+  .user .file { color:var(--muted); font-size:12px; word-break:break-all; }
+  .warn { color:var(--warn); font-size:12px; margin-top:10px; }
+  .status { font-size:12px; color:var(--muted); margin-top:12px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--muted); margin-right:6px; }
+  .dot.on { background:var(--ok); }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--panel); border:1px solid var(--line); padding:8px 14px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; }
+  .toast.show { opacity:1; }
+  .controls { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 WatchTogether</h1>
+  <span class="room">Room <b id="roomId"></b></span>
+  <button id="copyLink">Copy invite link</button>
+  <span class="spacer"></span>
+  <input type="text" id="nameInput" placeholder="Your name" maxlength="30" />
+</header>
+
+<main>
+  <div>
+    <div class="stage">
+      <video id="video" controls playsinline></video>
+      <div class="empty" id="empty">
+        <div>Pick the movie file on your device.<br/>Your friend picks the same file on theirs.</div>
+        <label class="btn primary" for="fileInput">Choose movie file</label>
+      </div>
+      <div class="overlay" id="resumeOverlay">
+        <button class="primary" id="resumeBtn">▶ Click to join playback</button>
+      </div>
+    </div>
+    <div class="controls">
+      <label class="btn" for="fileInput">Change movie</label>
+      <label class="btn" for="subInput">Add subtitles (.srt / .vtt)</label>
+      <button id="resyncBtn">Force resync</button>
+    </div>
+    <input type="file" id="fileInput" accept="video/*,.mkv,.mp4,.webm,.mov,.m4v" />
+    <input type="file" id="subInput" accept=".srt,.vtt" />
+  </div>
+
+  <aside>
+    <h2>In this room</h2>
+    <div id="users"></div>
+    <div class="warn" id="mismatch"></div>
+    <div class="status"><span class="dot" id="connDot"></span><span id="connText">Connecting…</span></div>
+    <div class="status" id="driftText"></div>
+  </aside>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(() => {
+    const $ = (id) => document.getElementById(id);
+    const video = $("video");
+    let fileInfo = null;
+
+
+    const params = new URLSearchParams(location.search);
+    let room = params.get("room");
+    if (!room) {
+    room = Math.random().toString(36).slice(2, 8);
+    params.set("room", room);
+    history.replaceState(null, "", "?" + params.toString());
+    }
+    $("roomId").textContent = room;
+
+
+    let name = localStorage.getItem("sw-name") || "Guest-" + Math.floor(Math.random() * 1000);
+    $("nameInput").value = name;
+    $("nameInput").addEventListener("change", (e) => {
+    name = e.target.value.trim() || name;
+    localStorage.setItem("sw-name", name);
+    const joinPayload = () => ({
+        room, name,
+        state: video.src ? { playing: !video.paused, time: video.currentTime } : null,
+    });
+    socket.emit("join", joinPayload());
+    if (fileInfo) socket.emit("file", fileInfo);
+    });
+
+    $("copyLink").onclick = async () => {
+    try { await navigator.clipboard.writeText(location.href); toast("Invite link copied"); }
+    catch { prompt("Copy this link:", location.href); }
+    };
+
+
+    const socket = io();
+    socket.on("connect", () => {
+    $("connDot").classList.add("on");
+    $("connText").textContent = "Connected";
+    const joinPayload = () => ({
+        room, name,
+        state: video.src ? { playing: !video.paused, time: video.currentTime } : null,
+    });
+    socket.emit("join", joinPayload());
+    if (fileInfo) socket.emit("file", fileInfo);
+    });
+    socket.on("disconnect", () => {
+    $("connDot").classList.remove("on");
+    $("connText").textContent = "Disconnected. Reconnecting…";
+    });
+
+
+    let suppressUntil = 0;
+    const suppressed = () => Date.now() < suppressUntil;
+    const quiet = (ms = 700) => { suppressUntil = Date.now() + ms; };
+
+    function send(type) {
+    if (!video.src || suppressed()) return;
+    socket.emit("action", { type, time: video.currentTime });
+    }
+    video.addEventListener("play", () => send("play"));
+    video.addEventListener("pause", () => { if (!video.ended) send("pause"); });
+    video.addEventListener("seeked", () => send("seek"));
+
+
+    let pendingState = null;
+
+    async function applyState({ playing, time }) {
+    if (!video.src || video.readyState < 1) { pendingState = { playing, time }; return; }
+    quiet();
+    if (Math.abs(video.currentTime - time) > 0.4) video.currentTime = time;
+    if (playing && video.paused) {
+        try { await video.play(); $("resumeOverlay").classList.remove("show"); }
+        catch { $("resumeOverlay").classList.add("show"); }
+    } else if (!playing && !video.paused) {
+        video.pause();
+    }
+    }
+
+    socket.on("state", applyState);
+
+    socket.on("action", (a) => {
+    const playing = a.type === "play" ? true : a.type === "pause" ? false : !video.paused;
+    applyState({ playing, time: a.time });
+    const verb = a.type === "play" ? "played" : a.type === "pause" ? "paused" : "jumped to " + fmt(a.time);
+    toast(`${a.by} ${verb}`);
+    });
+
+
+    async function syncNow(force = false) {
+    if (!video.src || video.readyState < 3 || video.seeking) return;
+
+    const t0 = performance.now();
+    const s = await new Promise((res) =>
+        socket.timeout(3000).emit("sync", null, (err, data) => res(err ? null : data))
+    );
+    if (!s) return;
+
+    const rtt = (performance.now() - t0) / 1000;
+    const target = s.time + (s.playing ? rtt / 2 : 0);
+    const diff = video.currentTime - target; // + means I'm ahead
+
+    // play/pause mismatch → fix that first
+    if (s.playing !== !video.paused) {
+        await applyState({ playing: s.playing, time: target });
+        return;
+    }
+
+    // paused → just line up the frame
+    if (!s.playing) {
+        if (force || Math.abs(diff) > 0.4) { quiet(); video.currentTime = target; }
+        video.playbackRate = 1;
+        return;
+    }
+
+    // playing → correct drift
+    if (force || Math.abs(diff) > 1.0) {
+        quiet(); video.currentTime = target; video.playbackRate = 1;   // big: jump
+    } else if (Math.abs(diff) > 0.15) {
+        video.playbackRate = diff > 0 ? 0.95 : 1.05;                    // small: nudge
+    } else {
+        video.playbackRate = 1;                                          // fine
+    }
+    $("driftText").textContent = `Sync offset: ${(diff * 1000).toFixed(0)} ms`;
+    }
+
+    setInterval(syncNow, 2000);
+    $("resyncBtn").onclick = () => syncNow(true);
+
+    $("resumeBtn").onclick = async () => {
+    $("resumeOverlay").classList.remove("show");
+    await syncNow(true);
+    };
+
+    $("fileInput").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (video.src) URL.revokeObjectURL(video.src);
+    [...video.querySelectorAll("track")].forEach((t) => t.remove());
+    quiet(1500);
+    video.src = URL.createObjectURL(f);
+    $("empty").style.display = "none";
+
+    video.onloadedmetadata = () => {
+        fileInfo = { name: f.name, duration: video.duration };
+        socket.emit("file", fileInfo);
+        socket.timeout(3000).emit("sync", null, (err, s) => {
+        applyState(err ? (pendingState || { playing: false, time: 0 }) : s);
+        pendingState = null;
+        });
+    };
+    video.onerror = () => toast("Your browser can't play this file's codec. Remux to MP4.", 6000);
+    });
+
+
+    $("subInput").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    let text = await f.text();
+    if (!text.trim().startsWith("WEBVTT")) {
+        text = "WEBVTT\n\n" + text.replace(/\r/g, "").replace(/(\d\d:\d\d:\d\d),(\d\d\d)/g, "$1.$2");
+    }
+    [...video.querySelectorAll("track")].forEach((t) => t.remove());
+    const track = document.createElement("track");
+    track.kind = "subtitles"; track.label = "Subtitles"; track.srclang = "en"; track.default = true;
+    track.src = URL.createObjectURL(new Blob([text], { type: "text/vtt" }));
+    video.appendChild(track);
+    track.addEventListener("load", () => { video.textTracks[0].mode = "showing"; });
+    toast("Subtitles loaded");
+    });
+
+
+    socket.on("users", (users) => {
+    $("users").innerHTML = users.map((u) => `
+        <div class="user"><div>${esc(u.name)}</div>
+        <div class="file">${u.file ? esc(u.file.name) + " · " + fmt(u.file.duration) : "No file loaded yet"}</div></div>`).join("");
+    const durs = users.filter((u) => u.file).map((u) => u.file.duration);
+    const mismatch = durs.length > 1 && Math.max(...durs) - Math.min(...durs) > 2;
+    $("mismatch").textContent = mismatch ? "⚠ Your files have different lengths and may drift." : "";
+    });
+
+
+    function fmt(s) {
+    if (!isFinite(s)) return "--:--";
+    s = Math.floor(s);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+    }
+    function esc(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+    let toastTimer;
+    function toast(msg, ms = 2200) {
+    const t = $("toast"); t.textContent = msg; t.classList.add("show");
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), ms);
+    }
+})();
+</script>
+</body>
+</html>
